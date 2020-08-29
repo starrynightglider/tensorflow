@@ -102,6 +102,11 @@ LABEL_IMAGE_SRCS := \
 	tensorflow/lite/examples/label_image/label_image.cc \
 	tensorflow/lite/tools/evaluation/utils.cc
 
+SSD_CLASSIFIER_SRCS := \
+	tensorflow/lite/examples/ssd_classifier/bitmap_helpers.cc \
+	tensorflow/lite/examples/ssd_classifier/ssd_classifier.cc \
+	tensorflow/lite/tools/evaluation/utils.cc
+
 # What sources we want to compile, must be kept in sync with the main Bazel
 # build files.
 
@@ -279,6 +284,7 @@ BENCHMARK_BINARY := $(BINDIR)$(BENCHMARK_BINARY_NAME)
 BENCHMARK_PERF_OPTIONS_BINARY := $(BINDIR)$(BENCHMARK_PERF_OPTIONS_BINARY_NAME)
 MINIMAL_BINARY := $(BINDIR)minimal
 LABEL_IMAGE_BINARY := $(BINDIR)label_image
+SSD_CLASSIFIER_BINARY := $(BINDIR)ssd_classifier
 
 CXX := $(CC_PREFIX)${TARGET_TOOLCHAIN_PREFIX}g++
 CC := $(CC_PREFIX)${TARGET_TOOLCHAIN_PREFIX}gcc
@@ -289,6 +295,9 @@ $(patsubst %.cc,%.o,$(patsubst %.c,%.o,$(MINIMAL_SRCS))))
 
 LABEL_IMAGE_OBJS := $(addprefix $(OBJDIR), \
 $(patsubst %.cc,%.o,$(patsubst %.c,%.o,$(LABEL_IMAGE_SRCS))))
+
+SSD_CLASSIFIER_OBJS := $(addprefix $(OBJDIR), \
+$(patsubst %.cc,%.o,$(patsubst %.c,%.o,$(SSD_CLASSIFIER_SRCS))))
 
 LIB_OBJS := $(addprefix $(OBJDIR), \
 $(patsubst %.cc,%.o,$(patsubst %.c,%.o,$(patsubst %.cpp,%.o,$(TF_LITE_CC_SRCS)))))
@@ -348,6 +357,14 @@ $(LABEL_IMAGE_BINARY): $(LABEL_IMAGE_OBJS) $(LIB_PATH)
 	$(LIBFLAGS) $(LIB_PATH) $(LDFLAGS) $(LIBS)
 
 label_image: $(LABEL_IMAGE_BINARY)
+
+$(SSD_CLASSIFIER_BINARY): $(SSD_CLASSIFIER_OBJS) $(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) \
+	-o $(SSD_CLASSIFIER_BINARY) $(SSD_CLASSIFIER_OBJS) \
+	$(LIBFLAGS) $(LIB_PATH) $(LDFLAGS) $(LIBS)
+
+ssd_classifier: $(SSD_CLASSIFIER_BINARY)
 
 $(BENCHMARK_LIB) : $(LIB_PATH) $(BENCHMARK_LIB_OBJS)
 	@mkdir -p $(dir $@)
