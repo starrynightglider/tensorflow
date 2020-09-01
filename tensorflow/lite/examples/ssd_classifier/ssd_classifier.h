@@ -22,28 +22,55 @@ limitations under the License.
 namespace tflite {
 namespace ssd_classifier {
 
+using TfLiteDelegatePtr = tflite::Interpreter::TfLiteDelegatePtr;
+using TfLiteDelegatePtrMap = std::map<std::string, TfLiteDelegatePtr>;
+using TfLiteFlatBufferModelPtr = std::unique_ptr<tflite::FlatBufferModel>;
+using TfLiteInterpreterPtr = std::unique_ptr<tflite::Interpreter>;
+
+
 struct Settings {
-  bool verbose = false;
-  bool accel = false;
-  bool old_accel = false;
+  int verbose = 0;
   TfLiteType input_type = kTfLiteFloat32;
-  bool profiling = false;
   bool allow_fp16 = false;
-  bool gl_backend = false;
-  bool hexagon_delegate = false;
-  bool xnnpack_delegate = false;
   int loop_count = 1;
   float input_mean = 127.5f;
   float input_std = 127.5f;
-  string model_name = "./mobilenet_quant_v1_224.tflite";
+  string model_name = "";
   tflite::FlatBufferModel* model;
-  string input_bmp_name = "./grace_hopper.bmp";
-  string labels_file_name = "./labels.txt";
-  int number_of_threads = 4;
+  string input_bmp_name = "";
+  string labels_file_name = "";
+  int number_of_threads = 1;
   int number_of_results = 5;
-  int max_profiling_buffer_entries = 1024;
   int number_of_warmup_runs = 2;
 };
+
+class SsdClassifier{
+  public:
+  SsdClassifier(Settings *s);
+
+  // Takes a file name, and loads a list of labels from it, one per line, and
+  // returns a vector of the strings. It pads with empty strings so the length
+  // of the result is a multiple of 16, because our model expects that.
+  TfLiteStatus ReadLabelsFile(const string& file_name,
+                            std::vector<string>* result,
+                            size_t* found_label_count);
+  void RunInference();
+
+  private:
+
+  TfLiteFlatBufferModelPtr model_;
+  TfLiteInterpreterPtr interpreter_;
+  Settings *s_;
+  int input_tf_idx_;
+  int input_tf_height_;
+  int input_tf_width_;
+  int input_tf_channel_;
+
+  std::vector<string> labels_;
+  size_t label_count_;
+};
+
+
 
 }  // namespace ssd_classifier
 }  // namespace tflite

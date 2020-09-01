@@ -1,18 +1,3 @@
-/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-==============================================================================*/
-
 #include "tensorflow/lite/examples/ssd_classifier/ssd_classifier.h"
 
 #include <fcntl.h>      // NOLINT(build/include_order)
@@ -48,18 +33,72 @@ namespace ssd_classifier {
 
 double get_us(struct timeval t) { return (t.tv_sec * 1000000 + t.tv_usec); }
 
-using TfLiteDelegatePtr = tflite::Interpreter::TfLiteDelegatePtr;
-using TfLiteDelegatePtrMap = std::map<std::string, TfLiteDelegatePtr>;
+SsdClassifier::SsdClassifier(Settings *s):s_(s){
 
-TfLiteDelegatePtrMap GetDelegates(Settings* s) {
-  TfLiteDelegatePtrMap delegates;
-  return delegates;
+  if (s_->model_name.empty()) {
+    LOG(ERROR) << "no model file name\n";
+    exit(-1);
+  }
+
+  model_ = tflite::FlatBufferModel::BuildFromFile(s_->model_name.c_str());
+  if (!model_) {
+    LOG(FATAL) << "\nFailed to mmap model " << s_->model_name << std::endl;
+    exit(-1);
+  }
+  s_->model = model_.get();
+  LOG(INFO) << "Loaded model " << s_->model_name << std::endl;
+  model_->error_reporter();
+  LOG(INFO) << "resolved reporter" << std::endl;
+
+  tflite::ops::builtin::BuiltinOpResolver resolver;
+
+  tflite::InterpreterBuilder(*model_, resolver)(&interpreter_);
+  if (!interpreter_) {
+    LOG(FATAL) << "Failed to construct interpreter\n";
+    exit(-1);
+  }
+
+  interpreter_->SetAllowFp16PrecisionForFp32(s_->allow_fp16);
+
+  // Input dimentions
+  input_tf_idx_ = interpreter_->inputs()[0];
+  const auto & data = interpreter_->tensor(input_tf_idx_)->dims->data;
+  input_tf_height_ = data[1];
+  input_tf_width_ = data[2];
+  input_tf_channel_ = data[3];
+
+  if (s_->verbose) {
+    LOG(INFO) << "tensors size: " << interpreter_->tensors_size() << "\n";
+    LOG(INFO) << "nodes size: " << interpreter_->nodes_size() << "\n";
+    LOG(INFO) << "inputs: " << interpreter_->inputs().size() << "\n";
+    LOG(INFO) << "input(0) name: " << interpreter_->GetInputName(0) << "\n";
+    LOG(INFO) << "input(0) idx: " << interpreter_->inputs()[0]<< "\n";
+    LOG(INFO) << "input dims: " << input_tf_height_<<"x"<<input_tf_width_<<"x"<<input_tf_channel_<<std::endl;
+
+    if (s_->verbose >= 2){
+      int t_size = interpreter_->tensors_size();
+      for (int i = 0; i < t_size; i++) {
+        if (interpreter_->tensor(i)->name)
+          LOG(INFO) << i << ": " << interpreter_->tensor(i)->name << ", "
+                    << interpreter_->tensor(i)->bytes << ", "
+                    << interpreter_->tensor(i)->type << ", "
+                    << interpreter_->tensor(i)->params.scale << ", "
+                    << interpreter_->tensor(i)->params.zero_point << "\n";
+      }
+    }
+  }
+
+  if (s_->number_of_threads != -1) {
+    interpreter_->SetNumThreads(s_->number_of_threads);
+  }
+
+  if (ReadLabelsFile(s_->labels_file_name, &labels_, &label_count_) != kTfLiteOk){
+    LOG(FATAL) << "Failed to construct read label file: "<< s_->labels_file_name<< std::endl;
+    exit(-1);
+  }
 }
 
-// Takes a file name, and loads a list of labels from it, one per line, and
-// returns a vector of the strings. It pads with empty strings so the length
-// of the result is a multiple of 16, because our model expects that.
-TfLiteStatus ReadLabelsFile(const string& file_name,
+TfLiteStatus SsdClassifier::ReadLabelsFile(const string& file_name,
                             std::vector<string>* result,
                             size_t* found_label_count) {
   std::ifstream file(file_name);
@@ -80,176 +119,111 @@ TfLiteStatus ReadLabelsFile(const string& file_name,
   return kTfLiteOk;
 }
 
-void RunInference(Settings* s) {
-  if (!s->model_name.c_str()) {
-    LOG(ERROR) << "no model file name\n";
-    exit(-1);
-  }
-
-  std::unique_ptr<tflite::FlatBufferModel> model;
-  std::unique_ptr<tflite::Interpreter> interpreter;
-  model = tflite::FlatBufferModel::BuildFromFile(s->model_name.c_str());
-  if (!model) {
-    LOG(FATAL) << "\nFailed to mmap model " << s->model_name << "\n";
-    exit(-1);
-  }
-  s->model = model.get();
-  LOG(INFO) << "Loaded model " << s->model_name << "\n";
-  model->error_reporter();
-  LOG(INFO) << "resolved reporter\n";
-
-  tflite::ops::builtin::BuiltinOpResolver resolver;
-
-  tflite::InterpreterBuilder(*model, resolver)(&interpreter);
-  if (!interpreter) {
-    LOG(FATAL) << "Failed to construct interpreter\n";
-    exit(-1);
-  }
-
-  interpreter->SetAllowFp16PrecisionForFp32(s->allow_fp16);
-
-  if (s->verbose) {
-    LOG(INFO) << "tensors size: " << interpreter->tensors_size() << "\n";
-    LOG(INFO) << "nodes size: " << interpreter->nodes_size() << "\n";
-    LOG(INFO) << "inputs: " << interpreter->inputs().size() << "\n";
-    LOG(INFO) << "input(0) name: " << interpreter->GetInputName(0) << "\n";
-
-    int t_size = interpreter->tensors_size();
-    for (int i = 0; i < t_size; i++) {
-      if (interpreter->tensor(i)->name)
-        LOG(INFO) << i << ": " << interpreter->tensor(i)->name << ", "
-                  << interpreter->tensor(i)->bytes << ", "
-                  << interpreter->tensor(i)->type << ", "
-                  << interpreter->tensor(i)->params.scale << ", "
-                  << interpreter->tensor(i)->params.zero_point << "\n";
-    }
-  }
-
-  if (s->number_of_threads != -1) {
-    interpreter->SetNumThreads(s->number_of_threads);
-  }
+void SsdClassifier::RunInference() {
 
   int image_width = 224;
   int image_height = 224;
   int image_channels = 3;
-  std::vector<uint8_t> in = read_bmp(s->input_bmp_name, &image_width,
-                                     &image_height, &image_channels, s);
+  std::vector<uint8_t> in = read_bmp(s_->input_bmp_name, &image_width,
+                                     &image_height, &image_channels, s_);
 
-  int input = interpreter->inputs()[0];
-  if (s->verbose) LOG(INFO) << "input: " << input << "\n";
+  const std::vector<int> inputs = interpreter_->inputs();
+  const std::vector<int> outputs = interpreter_->outputs();
 
-  const std::vector<int> inputs = interpreter->inputs();
-  const std::vector<int> outputs = interpreter->outputs();
+  int input = interpreter_->inputs()[0];
+  if (s_->verbose) LOG(INFO) << "input: " << input << "\n";
 
-  if (s->verbose) {
+  if (s_->verbose) {
     LOG(INFO) << "number of inputs: " << inputs.size() << "\n";
     LOG(INFO) << "number of outputs: " << outputs.size() << "\n";
   }
 
-  auto delegates_ = GetDelegates(s);
-  for (const auto& delegate : delegates_) {
-    if (interpreter->ModifyGraphWithDelegate(delegate.second.get()) !=
-        kTfLiteOk) {
-      LOG(FATAL) << "Failed to apply " << delegate.first << " delegate.";
-    } else {
-      LOG(INFO) << "Applied " << delegate.first << " delegate.";
-    }
-  }
 
-  if (interpreter->AllocateTensors() != kTfLiteOk) {
+  if (interpreter_->AllocateTensors() != kTfLiteOk) {
     LOG(FATAL) << "Failed to allocate tensors!";
   }
 
-  // get input dimension from the input tensor metadata
-  // assuming one input only
-  TfLiteIntArray* dims = interpreter->tensor(input)->dims;
-  int wanted_height = dims->data[1];
-  int wanted_width = dims->data[2];
-  int wanted_channels = dims->data[3];
 
-  s->input_type = interpreter->tensor(input)->type;
-  switch (s->input_type) {
+
+  s_->input_type = interpreter_->tensor(input_tf_idx_)->type;
+  LOG(FATAL) << "Input type " << s_->input_type<<std::endl ;
+
+  switch (s_->input_type) {
     case kTfLiteFloat32:
-      resize<float>(interpreter->typed_tensor<float>(input), in.data(),
-                    image_height, image_width, image_channels, wanted_height,
-                    wanted_width, wanted_channels, s);
+      resize<float>(interpreter_->typed_tensor<float>(input_tf_idx_), in.data(),
+                    image_height, image_width, image_channels, input_tf_height_,
+                    input_tf_width_, input_tf_channel_, s_);
       break;
     case kTfLiteInt8:
-      resize<int8_t>(interpreter->typed_tensor<int8_t>(input), in.data(),
-                     image_height, image_width, image_channels, wanted_height,
-                     wanted_width, wanted_channels, s);
+      resize<int8_t>(interpreter_->typed_tensor<int8_t>(input_tf_idx_), in.data(),
+                     image_height, image_width, image_channels, input_tf_height_,
+                     input_tf_width_, input_tf_channel_, s_);
       break;
     case kTfLiteUInt8:
-      resize<uint8_t>(interpreter->typed_tensor<uint8_t>(input), in.data(),
-                      image_height, image_width, image_channels, wanted_height,
-                      wanted_width, wanted_channels, s);
+      resize<uint8_t>(interpreter_->typed_tensor<uint8_t>(input_tf_idx_), in.data(),
+                      image_height, image_width, image_channels, input_tf_height_,
+                      input_tf_width_, input_tf_channel_, s_);
       break;
     default:
       LOG(FATAL) << "cannot handle input type "
-                 << interpreter->tensor(input)->type << " yet";
+                 << interpreter_->tensor(input_tf_idx_)->type << " yet";
       exit(-1);
   }
 
-  if (s->loop_count > 1)
-    for (int i = 0; i < s->number_of_warmup_runs; i++) {
-      if (interpreter->Invoke() != kTfLiteOk) {
+  if (s_->loop_count > 1)
+    for (int i = 0; i < s_->number_of_warmup_runs; i++) {
+      if (interpreter_->Invoke() != kTfLiteOk) {
         LOG(FATAL) << "Failed to invoke tflite!\n";
       }
     }
 
   struct timeval start_time, stop_time;
   gettimeofday(&start_time, nullptr);
-  for (int i = 0; i < s->loop_count; i++) {
-    if (interpreter->Invoke() != kTfLiteOk) {
+  for (int i = 0; i < s_->loop_count; i++) {
+    if (interpreter_->Invoke() != kTfLiteOk) {
       LOG(FATAL) << "Failed to invoke tflite!\n";
     }
   }
   gettimeofday(&stop_time, nullptr);
   LOG(INFO) << "invoked \n";
   LOG(INFO) << "average time: "
-            << (get_us(stop_time) - get_us(start_time)) / (s->loop_count * 1000)
+            << (get_us(stop_time) - get_us(start_time)) / (s_->loop_count * 1000)
             << " ms \n";
 
   const float threshold = 0.001f;
 
   std::vector<std::pair<float, int>> top_results;
 
-  int output = interpreter->outputs()[0];
-  TfLiteIntArray* output_dims = interpreter->tensor(output)->dims;
+  int output = interpreter_->outputs()[0];
+  TfLiteIntArray* output_dims = interpreter_->tensor(output)->dims;
   // assume output dims to be something like (1, 1, ... ,size)
   auto output_size = output_dims->data[output_dims->size - 1];
-  switch (interpreter->tensor(output)->type) {
+  switch (interpreter_->tensor(output)->type) {
     case kTfLiteFloat32:
-      get_top_n<float>(interpreter->typed_output_tensor<float>(0), output_size,
-                       s->number_of_results, threshold, &top_results,
-                       s->input_type);
+      get_top_n<float>(interpreter_->typed_output_tensor<float>(0), output_size,
+                       s_->number_of_results, threshold, &top_results,
+                       s_->input_type);
       break;
     case kTfLiteInt8:
-      get_top_n<int8_t>(interpreter->typed_output_tensor<int8_t>(0),
-                        output_size, s->number_of_results, threshold,
-                        &top_results, s->input_type);
+      get_top_n<int8_t>(interpreter_->typed_output_tensor<int8_t>(0),
+                        output_size, s_->number_of_results, threshold,
+                        &top_results, s_->input_type);
       break;
     case kTfLiteUInt8:
-      get_top_n<uint8_t>(interpreter->typed_output_tensor<uint8_t>(0),
-                         output_size, s->number_of_results, threshold,
-                         &top_results, s->input_type);
+      get_top_n<uint8_t>(interpreter_->typed_output_tensor<uint8_t>(0),
+                         output_size, s_->number_of_results, threshold,
+                         &top_results, s_->input_type);
       break;
     default:
       LOG(FATAL) << "cannot handle output type "
-                 << interpreter->tensor(output)->type << " yet";
+                 << interpreter_->tensor(output)->type << " yet";
       exit(-1);
   }
-
-  std::vector<string> labels;
-  size_t label_count;
-
-  if (ReadLabelsFile(s->labels_file_name, &labels, &label_count) != kTfLiteOk)
-    exit(-1);
 
   for (const auto& result : top_results) {
     const float confidence = result.first;
     const int index = result.second;
-    LOG(INFO) << confidence << ": " << index << " " << labels[index] << "\n";
+    LOG(INFO) << confidence << ": " << index << " " << labels_[index] << "\n";
   }
 }
 
@@ -263,7 +237,6 @@ void display_usage() {
       << "--image, -i: image_name.bmp\n"
       << "--labels, -l: labels for the model\n"
       << "--tflite_model, -m: model_name.tflite\n"
-      << "--profiling, -p: [0|1], profiling or not\n"
       << "--num_results, -r: number of results to show\n"
       << "--threads, -t: number of threads\n"
       << "--verbose, -v: [0|1] print more information\n"
@@ -283,12 +256,10 @@ int Main(int argc, char** argv) {
         {"image", required_argument, nullptr, 'i'},
         {"labels", required_argument, nullptr, 'l'},
         {"tflite_model", required_argument, nullptr, 'm'},
-        {"profiling", required_argument, nullptr, 'p'},
         {"threads", required_argument, nullptr, 't'},
         {"input_mean", required_argument, nullptr, 'b'},
         {"input_std", required_argument, nullptr, 's'},
         {"num_results", required_argument, nullptr, 'r'},
-        {"max_profiling_buffer_entries", required_argument, nullptr, 'e'},
         {"warmup_runs", required_argument, nullptr, 'w'},
         {nullptr, 0, nullptr, 0}};
 
@@ -296,7 +267,7 @@ int Main(int argc, char** argv) {
     int option_index = 0;
 
     c = getopt_long(argc, argv,
-                    "a:b:c:d:e:f:g:i:j:l:m:p:r:s:t:v:w:x:", long_options,
+                    "a:b:c:f:g:i:j:l:m:r:s:t:v:w:x:", long_options,
                     &option_index);
 
     /* Detect the end of the options. */
@@ -313,20 +284,8 @@ int Main(int argc, char** argv) {
         s.loop_count =
             strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
         break;
-      case 'd':
-        s.old_accel =
-            strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
-        break;
-      case 'e':
-        s.max_profiling_buffer_entries =
-            strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
-        break;
       case 'f':
         s.allow_fp16 =
-            strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
-        break;
-      case 'g':
-        s.gl_backend =
             strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
         break;
       case 'i':
@@ -337,10 +296,6 @@ int Main(int argc, char** argv) {
         break;
       case 'm':
         s.model_name = optarg;
-        break;
-      case 'p':
-        s.profiling =
-            strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
         break;
       case 'r':
         s.number_of_results =
@@ -370,7 +325,8 @@ int Main(int argc, char** argv) {
         exit(-1);
     }
   }
-  RunInference(&s);
+  SsdClassifier classifier(&s);
+  classifier.RunInference();
   return 0;
 }
 
