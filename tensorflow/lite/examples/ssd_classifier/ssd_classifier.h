@@ -1,21 +1,8 @@
-/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-==============================================================================*/
-
 #ifndef TENSORFLOW_LITE_EXAMPLES_SSD_CLASSIFIER_SSD_CLASSIFIER_H_
 #define TENSORFLOW_LITE_EXAMPLES_SSD_CLASSIFIER_SSD_CLASSIFIER_H_
 
+#include <vector>
+#include <unordered_set>
 #include "tensorflow/lite/model.h"
 #include "tensorflow/lite/string_type.h"
 
@@ -44,6 +31,33 @@ struct Settings {
   int number_of_warmup_runs = 2;
 };
 
+// Detected objects of the same label
+struct LabeledObjects{
+  void insert(float box[4], float score){
+    // x1, y1, x2, y2 -> y1, x1, y2, x2
+    bboxes.push_back({box[1], box[0], box[3], box[2]});
+    // bboxes.push_back({box[0], box[1], box[2], box[3]});
+
+    scores.emplace_back(score);
+  }
+  std::vector<std::array<float, 4>> bboxes;
+  std::vector<float> scores;
+};
+
+std::ostream & operator<< (std::ostream &out, const LabeledObjects & in){
+  for (auto i=0; i<in.bboxes.size(); ++i){
+    out<<"Box[ "<<in.bboxes[i][0]<<" "<<in.bboxes[i][1]<<" "<<
+                  in.bboxes[i][2]<<" "<<in.bboxes[i][3]<<" ] score "<<
+                  in.scores[i]<<std::endl;
+  }
+  return out;
+}
+
+
+
+
+
+
 class SsdClassifier{
   public:
   SsdClassifier(Settings *s);
@@ -57,6 +71,12 @@ class SsdClassifier{
   void RunInference();
 
   private:
+  void Resize();
+  int GetNumObjects();
+  std::unordered_set<int> GetDetectedClasses();
+  void CategoryObjectsByLabel();
+  void NmsBoxes(LabeledObjects *objs,
+    int max_output_size, float iou_threshld, float score_threshold); // Non Maximal Supression
 
   TfLiteFlatBufferModelPtr model_;
   TfLiteInterpreterPtr interpreter_;
@@ -68,7 +88,9 @@ class SsdClassifier{
 
   std::vector<string> labels_;
   size_t label_count_;
+  std::unordered_map<int, LabeledObjects> labeled_objects_;
 };
+
 
 
 

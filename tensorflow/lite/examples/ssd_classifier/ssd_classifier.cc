@@ -17,8 +17,6 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <unordered_set>
-#include <vector>
 
 #include "tensorflow/lite/examples/ssd_classifier/bitmap_helpers.h"
 #include "tensorflow/lite/examples/ssd_classifier/get_top_n.h"
@@ -119,13 +117,95 @@ TfLiteStatus SsdClassifier::ReadLabelsFile(const string& file_name,
   return kTfLiteOk;
 }
 
+void SsdClassifier::NmsBoxes(LabeledObjects *objs,
+  int max_output_size, float iou_threshld, float score_threshold){
+  TfLiteInterpreterPtr interpreter(new Interpreter);
+
+  auto & boxes = objs->bboxes;
+  auto & scores = objs->scores;
+  int num_boxes = boxes.size();
+  int base_index = 0;
+
+  // two inputs: boxes and scores
+  interpreter->AddTensors(5, &base_index);
+  // two output
+  interpreter->AddTensors(2, &base_index);
+  // set input and output tensors
+  interpreter->SetInputs({0, 1, 2, 3, 4});
+  interpreter->SetOutputs({5, 6});
+
+  // set parameters of tensors
+  TfLiteQuantizationParams quant;
+  interpreter->SetTensorParametersReadWrite(
+      0, kTfLiteFloat32, "boxes",
+      {num_boxes, 4}, quant);
+  interpreter->SetTensorParametersReadWrite(
+      1, kTfLiteFloat32, "scores",
+      {num_boxes}, quant);
+  interpreter->SetTensorParametersReadWrite(
+      2, kTfLiteInt32, "max_output_size",
+      {}, quant);
+  interpreter->SetTensorParametersReadWrite(
+      3, kTfLiteFloat32, "iou_threshld",
+      {}, quant);
+  interpreter->SetTensorParametersReadWrite(
+      4, kTfLiteFloat32, "score_threshold",
+      {}, quant);
+  interpreter->SetTensorParametersReadWrite(
+      5, kTfLiteInt32, "selected_indices",
+      {max_output_size}, quant);
+  interpreter->SetTensorParametersReadWrite(
+      6, kTfLiteInt32, "valid_outputs",
+      {}, quant);
+
+  ops::builtin::BuiltinOpResolver resolver;
+  const TfLiteRegistration* nms_op =
+      resolver.FindOp(BuiltinOperator_NON_MAX_SUPPRESSION_V5, 1);
+
+  interpreter->AddNodeWithParameters({0, 1, 2, 3, 4}, {5, 6}, nullptr, 0, nullptr, nms_op,
+                                     nullptr);
+
+  interpreter->AllocateTensors();
+
+  // fill in input
+  auto tf_boxes = interpreter->typed_tensor<float>(0);
+  auto tf_scores = interpreter->typed_tensor<float>(1);
+
+  for (auto i = 0; i < num_boxes; i++) {
+    tf_boxes[4*i] = boxes[i][0];
+    tf_boxes[4*i+1] = boxes[i][1];
+    tf_boxes[4*i+2] = boxes[i][2];
+    tf_boxes[4*i+3] = boxes[i][3];
+  }
+  for (auto i = 0; i < num_boxes; i++) {
+    tf_scores[i] = scores[i];
+  }
+  interpreter->typed_tensor<int>(2)[0] = max_output_size;
+  interpreter->typed_tensor<float>(3)[0] = iou_threshld;
+  interpreter->typed_tensor<float>(4)[0] = score_threshold;
+
+  interpreter->Invoke();
+
+  auto selected = interpreter->typed_tensor<int>(5);
+  auto num_selected = interpreter->typed_tensor<int>(6)[0];
+
+  LOG(INFO)<<"Selected: "<<std::endl;
+
+  for (auto i=0; i<num_selected; ++i){
+    LOG(INFO)<<selected[i]<<" ";
+  }
+  LOG(INFO)<<std::endl;
+}
+
 void SsdClassifier::RunInference() {
 
   int image_width = 224;
   int image_height = 224;
   int image_channels = 3;
   std::vector<uint8_t> in = read_bmp(s_->input_bmp_name, &image_width,
-                                     &image_height, &image_channels, s_);
+                                     &image_height, &image_channels);
+
+  LOG(INFO) << "Image size= "<<image_width <<" x "<<image_height<<std::endl;
 
   const std::vector<int> inputs = interpreter_->inputs();
   const std::vector<int> outputs = interpreter_->outputs();
@@ -138,27 +218,14 @@ void SsdClassifier::RunInference() {
     LOG(INFO) << "number of outputs: " << outputs.size() << "\n";
   }
 
-
   if (interpreter_->AllocateTensors() != kTfLiteOk) {
     LOG(FATAL) << "Failed to allocate tensors!";
   }
-
-
 
   s_->input_type = interpreter_->tensor(input_tf_idx_)->type;
   LOG(FATAL) << "Input type " << s_->input_type<<std::endl ;
 
   switch (s_->input_type) {
-    case kTfLiteFloat32:
-      resize<float>(interpreter_->typed_tensor<float>(input_tf_idx_), in.data(),
-                    image_height, image_width, image_channels, input_tf_height_,
-                    input_tf_width_, input_tf_channel_, s_);
-      break;
-    case kTfLiteInt8:
-      resize<int8_t>(interpreter_->typed_tensor<int8_t>(input_tf_idx_), in.data(),
-                     image_height, image_width, image_channels, input_tf_height_,
-                     input_tf_width_, input_tf_channel_, s_);
-      break;
     case kTfLiteUInt8:
       resize<uint8_t>(interpreter_->typed_tensor<uint8_t>(input_tf_idx_), in.data(),
                       image_height, image_width, image_channels, input_tf_height_,
@@ -170,25 +237,24 @@ void SsdClassifier::RunInference() {
       exit(-1);
   }
 
-  if (s_->loop_count > 1)
-    for (int i = 0; i < s_->number_of_warmup_runs; i++) {
-      if (interpreter_->Invoke() != kTfLiteOk) {
-        LOG(FATAL) << "Failed to invoke tflite!\n";
-      }
-    }
-
   struct timeval start_time, stop_time;
   gettimeofday(&start_time, nullptr);
-  for (int i = 0; i < s_->loop_count; i++) {
-    if (interpreter_->Invoke() != kTfLiteOk) {
+  if (interpreter_->Invoke() != kTfLiteOk) {
       LOG(FATAL) << "Failed to invoke tflite!\n";
-    }
   }
   gettimeofday(&stop_time, nullptr);
-  LOG(INFO) << "invoked \n";
-  LOG(INFO) << "average time: "
+  LOG(INFO) << "Invoked! average time: "
             << (get_us(stop_time) - get_us(start_time)) / (s_->loop_count * 1000)
             << " ms \n";
+
+  // get number of objects detected
+  int num_objects = GetNumObjects();
+
+  CategoryObjectsByLabel();
+  for (auto &l: labeled_objects_){
+    NmsBoxes(&l.second, 10, 0.3, 0.1);
+  }
+
 
   const float threshold = 0.001f;
 
@@ -196,8 +262,8 @@ void SsdClassifier::RunInference() {
 
   int output = interpreter_->outputs()[0];
   TfLiteIntArray* output_dims = interpreter_->tensor(output)->dims;
-  // assume output dims to be something like (1, 1, ... ,size)
   auto output_size = output_dims->data[output_dims->size - 1];
+
   switch (interpreter_->tensor(output)->type) {
     case kTfLiteFloat32:
       get_top_n<float>(interpreter_->typed_output_tensor<float>(0), output_size,
@@ -226,6 +292,63 @@ void SsdClassifier::RunInference() {
     LOG(INFO) << confidence << ": " << index << " " << labels_[index] << "\n";
   }
 }
+
+
+int SsdClassifier::GetNumObjects(){
+    auto output_idx = interpreter_->outputs()[0];
+    auto output_dims = interpreter_->tensor(output_idx)->dims;
+    int num_objects = output_dims->data[1];
+    LOG(INFO)<<"Number of objects: "<<num_objects<<std::endl;
+
+    return num_objects;
+}
+
+std::unordered_set<int> SsdClassifier::GetDetectedClasses(){
+    auto output_idx = interpreter_->outputs()[1];
+    auto output_dims = interpreter_->tensor(output_idx)->dims;
+    auto num_classes = output_dims->data[1];
+    auto output_data = interpreter_->typed_output_tensor<float>(1);
+    std::unordered_set<int> classes;
+    for (auto i=0; i<num_classes; ++i){
+      classes.insert(static_cast<int>(output_data[i]));
+    }
+    LOG(INFO)<<"Number of classes: "<<classes.size()<<std::endl;
+    return classes;
+}
+
+void SsdClassifier::CategoryObjectsByLabel(){
+    auto output_bbox_idx = interpreter_->outputs()[0];
+    auto output_class_idx = interpreter_->outputs()[1];
+    auto output_score_idx = interpreter_->outputs()[2];
+
+    auto num_objects = interpreter_->tensor(output_class_idx)->dims->data[1];
+
+    auto bbox_data = interpreter_->typed_output_tensor<float>(0);
+    auto class_data = interpreter_->typed_output_tensor<float>(1);
+    auto score_data = interpreter_->typed_output_tensor<float>(2);
+
+    for (auto i=0; i<num_objects; i++){
+      LOG(INFO)<<bbox_data[i*4]<<" "<<bbox_data[i*4+1]<<" "
+               <<bbox_data[i*4+2]<<" "<<bbox_data[i*4+3]<<" "
+               <<score_data[i]<<std::endl;
+    }
+
+
+    for (auto i=0; i<num_objects; ++i){
+      auto label = class_data[i];
+      float bbox[4] = { bbox_data[4*i], bbox_data[4*i+1],
+          bbox_data[4*i+2],
+          bbox_data[4*i+3]
+        };
+      labeled_objects_[label].insert(bbox,score_data[i]);
+    }
+    for (const auto & i: labeled_objects_){
+      LOG(INFO)<<"Categorized: "<< i.first<< std::endl<< i.second <<std::endl;
+    }
+
+
+}
+
 
 void display_usage() {
   LOG(INFO)
@@ -267,16 +390,13 @@ int Main(int argc, char** argv) {
     int option_index = 0;
 
     c = getopt_long(argc, argv,
-                    "a:b:c:f:g:i:j:l:m:r:s:t:v:w:x:", long_options,
+                    "b:c:f:g:i:j:l:m:r:s:t:v:w:x:", long_options,
                     &option_index);
 
     /* Detect the end of the options. */
     if (c == -1) break;
 
     switch (c) {
-      case 'a':
-        s.accel = strtol(optarg, nullptr, 10);  // NOLINT(runtime/deprecated_fn)
-        break;
       case 'b':
         s.input_mean = strtod(optarg, nullptr);
         break;

@@ -71,7 +71,7 @@ std::vector<uint8_t> decode_bmp(const uint8_t* input, int row_size, int width,
 }
 
 std::vector<uint8_t> read_bmp(const std::string& input_bmp_name, int* width,
-                              int* height, int* channels, Settings* s) {
+                              int* height, int* channels) {
   int begin, end;
 
   std::ifstream file(input_bmp_name, std::ios::in | std::ios::binary);
@@ -85,8 +85,6 @@ std::vector<uint8_t> read_bmp(const std::string& input_bmp_name, int* width,
   end = file.tellg();
   size_t len = end - begin;
 
-  if (s->verbose) LOG(INFO) << "len: " << len << "\n";
-
   std::vector<uint8_t> img_bytes(len);
   file.seekg(0, std::ios::beg);
   file.read(reinterpret_cast<char*>(img_bytes.data()), len);
@@ -97,10 +95,6 @@ std::vector<uint8_t> read_bmp(const std::string& input_bmp_name, int* width,
   const int32_t bpp =
       *(reinterpret_cast<const int32_t*>(img_bytes.data() + 28));
   *channels = bpp / 8;
-
-  if (s->verbose)
-    LOG(INFO) << "width, height, channels: " << *width << ", " << *height
-              << ", " << *channels << "\n";
 
   // there may be padding bytes when the width is not a multiple of 4 bytes
   // 8 * channels == bits per pixel
@@ -115,6 +109,5 @@ std::vector<uint8_t> read_bmp(const std::string& input_bmp_name, int* width,
   return decode_bmp(bmp_pixels, row_size, *width, abs(*height), *channels,
                     top_down);
 }
-
 }  // namespace ssd_classifier
 }  // namespace tflite
